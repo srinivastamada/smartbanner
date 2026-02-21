@@ -29,9 +29,8 @@
                 "input": "public"
               }
             ],
-            "styles": [
-              "src/styles.scss"
-            ]
+            "styles": ["src/styles.scss", "node_modules/smartbanner.js/dist/smartbanner.min.css"],
+            "scripts": ["node_modules/smartbanner.js/dist/smartbanner.min.js"]
           },
           "configurations": {
             "production": {
