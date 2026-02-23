@@ -35,24 +35,111 @@ function getMeta(name: string): string | null {
 @Injectable({ providedIn: 'root' })
 export class SmartbannerService {
   init(): void {
-    const labelInstalled = getMeta('smartbanner:button:installed')?.toUpperCase() ?? 'OPEN';
     const labelDefault = getMeta('smartbanner:button') ?? 'VIEW';
 
-    // Publish the banner immediately with the default label so it always shows.
+    // Publish the banner with the default label so it always shows.
     this.publishBanner(labelDefault);
 
-    // On mobile, attempt detection in the background and swap label if app is found.
+    // On mobile, attach a click handler so the deep-link action only fires
+    // when the user taps the banner button — never on page load.
     const isMobile = /android|ipad|iphone|ipod/i.test(navigator.userAgent);
     if (isMobile) {
-      this.detectAppInstalled().then((installed) => {
-        if (installed) {
-          this.setButtonMeta(labelInstalled);
-          // Also update the already-rendered banner button text in the DOM.
-          const btn = document.querySelector<HTMLElement>('.smartbanner__button');
-          if (btn) btn.textContent = labelInstalled;
-        }
-      });
+      this.attachButtonHandler();
     }
+  }
+
+  private attachButtonHandler(): void {
+    const tryAttach = () => {
+      const btn = document.querySelector<HTMLElement>('.smartbanner__button');
+      if (btn) {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.handleBannerAction();
+        });
+      } else {
+        // Button not yet in DOM — retry shortly after publish renders it.
+        setTimeout(tryAttach, 100);
+      }
+    };
+    tryAttach();
+  }
+
+  private handleBannerAction(): void {
+    const storeUrl = this.getStoreUrl();
+    const ua = navigator.userAgent;
+    const isIOS = /ipad|iphone|ipod/i.test(ua);
+
+    // On iOS, attempting a custom URL scheme when the app is not installed causes
+    // Safari to show "Safari cannot open the page because the address is invalid".
+    // To avoid that dialog, go directly to the App Store — which shows an "Open"
+    // button if the app is already installed, allowing it to be launched from there.
+    if (isIOS) {
+      if (storeUrl) window.location.href = storeUrl;
+      return;
+    }
+
+    // Android: try the deep link first; fall back to the Play Store on timeout.
+    const deepLink = getDeepLink();
+    if (!deepLink) {
+      if (storeUrl) window.location.href = storeUrl;
+      return;
+    }
+
+    let resolved = false;
+    const start = Date.now();
+
+    const finish = (installed: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      clearTimeout(fallbackTimer);
+      if (!installed && storeUrl) {
+        window.location.href = storeUrl;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        const onReturn = () => {
+          if (document.visibilityState === 'visible') {
+            document.removeEventListener('visibilitychange', onReturn);
+            finish(true);
+          }
+        };
+        document.addEventListener('visibilitychange', onReturn);
+        setTimeout(() => finish(true), 30_000);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.location.href = deepLink;
+
+    const fallbackTimer = setTimeout(() => {
+      const elapsed = Date.now() - start;
+      finish(elapsed > DETECTION_TIMEOUT_MS * 1.5);
+    }, DETECTION_TIMEOUT_MS);
+  }
+
+  private getStoreUrl(): string | null {
+    const ua = navigator.userAgent;
+    if (/android/i.test(ua)) {
+      return (
+        getMeta('smartbanner:button-url-google') ??
+        getMeta('smartbanner:google-play-url') ??
+        getMeta('smartbanner:url') ??
+        null
+      );
+    }
+    if (/ipad|iphone|ipod/i.test(ua)) {
+      return (
+        getMeta('smartbanner:button-url-apple') ??
+        getMeta('smartbanner:apple-app-store-url') ??
+        getMeta('smartbanner:url') ??
+        null
+      );
+    }
+    return getMeta('smartbanner:url') ?? null;
   }
 
   private publishBanner(label: string): void {
@@ -63,60 +150,6 @@ export class SmartbannerService {
       // Script not yet ready — wait for load and retry once.
       window.addEventListener('load', () => publishSmartbanner(), { once: true });
     }
-  }
-
-  private detectAppInstalled(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const deepLink = getDeepLink();
-      if (!deepLink) {
-        resolve(false);
-        return;
-      }
-
-      // Wait a tick so the banner renders visibly before we attempt navigation.
-      setTimeout(() => {
-        let resolved = false;
-        const start = Date.now();
-
-        const finish = (installed: boolean) => {
-          if (resolved) return;
-          resolved = true;
-          document.removeEventListener('visibilitychange', onVisibilityChange);
-          clearTimeout(fallbackTimer);
-          resolve(installed);
-        };
-
-        const onVisibilityChange = () => {
-          if (document.visibilityState === 'hidden') {
-            // Page went to background → app opened → installed.
-            // Wait for the user to return (visible) then confirm.
-            const onReturn = () => {
-              if (document.visibilityState === 'visible') {
-                document.removeEventListener('visibilitychange', onReturn);
-                finish(true);
-              }
-            };
-            document.addEventListener('visibilitychange', onReturn);
-            // Safety: if user never returns within 30s, still resolve.
-            setTimeout(() => finish(true), 30_000);
-          }
-        };
-
-        document.addEventListener('visibilitychange', onVisibilityChange);
-
-        // Navigate via window.location.href — the only reliable way to trigger
-        // custom URL schemes on both Android Chrome and iOS Safari.
-        window.location.href = deepLink;
-
-        // Fallback timer: if JS runs on schedule (not suspended), the app didn't open.
-        // If the app DID open, JS is throttled and the elapsed time will be >> timeout.
-        const fallbackTimer = setTimeout(() => {
-          const elapsed = Date.now() - start;
-          // If elapsed is considerably larger than our timeout, JS was suspended → installed.
-          finish(elapsed > DETECTION_TIMEOUT_MS * 1.5);
-        }, DETECTION_TIMEOUT_MS);
-      }, 300);
-    });
   }
 
   private setButtonMeta(label: string): void {
